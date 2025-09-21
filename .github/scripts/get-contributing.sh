@@ -1,92 +1,118 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# This script replaces the contents of a section with the contents from the annotated source address or local file paths inside the DEST file.
+# This script replaces the contents of a section with the contents from the annotated
+# source address or local file paths inside the DEST file.
+# It reads the DEST file into memory and writes the updated content back out.
 
-# read contents of file into memory
 DEST="../../en/resources/contributing.md"
 
-# track the header level 
+# track the header level (leading '#' characters)
 level=''
-# tracks src for curl calls
+# tracks src for curl calls (format: owner/repo path/to/file)
 src=''
-# tracks file paths for local file reads
+# tracks file paths for local file reads (final path only)
 local=''
-  while IFS= read -r line; do
-  # REMOVE PREVIOUS CONTENT SECTION
-  # if src or local tags are not empty
-  if [[ -n "$src" || -n "$local" ]]; then
-    #  if current line not a horitzontal rule hr
-    if  [[ "$line" != "----"* ]]; then
-    #  if line == level -- level is num of ##
-      if [[ "$line" == "$level"'#'*  ||
-      # line not a header line
-      "$line" != '#'* ]]; then
-        # skip line and rewrite over old content
-          continue
+
+# Read entire DEST first and write to DEST at the end to avoid truncation while reading.
+while IFS= read -r line; do
+  # If we're currently in a replacement region (from a previous anchor),
+  # skip lines until we reach the next header at the same level or a horizontal rule.
+  if [[ -n "${src}" || -n "${local}" ]]; then
+    if [[ "${line}" == ----* ]]; then
+      # horizontal rule signals end of replaced section; allow it to be printed below.
+      :
+    else
+      if [[ "${line}" == "${level}"* ]]; then
+        # we've reached the next header at the same level: stop replacing
+        src=''
+        local=''
+      else
+        # skip old content lines
+        continue
       fi
     fi
   fi
 
- # PRINT TO PAGE SECTION
-  src=''
-  local=''
-  # if line is a header
-  if [[ "$line" == '#'* ]]; then
-  # if header has (#id-of-link) or {#id-on-page} patterns
-    if [[ $line =~ (\(\#.*\))\. || "$line" =~ \{\#.*\} ]]; then
-      # isolate the matching part of line 
-      match=${BASH_REMATCH[0]}
-      # remove match - leaving rest
-      rest=${line//${match}}
-      # remove any # symbols from start 
-      title_rest=${rest##*\#}
-      # slice rest of line to get only level
-      level="${rest:0:$((${#rest} - ${#title_rest}))}"
-    else
-    # any other headers -- these before SRC/LOCAL pages anchors
-      header=${line##*\#} 
-      level="${line:0:$((${#line} - ${#header}))}"
-    fi
-  # if line is SRC anchor in read file 
-  elif [[ "$line" == '<!-- SRC:'* ]]; then
-    # remove the first 10 chars
-    src=${line:10}
-    # % remove from end until after white space -- leaves src details
-    src=${src% *}
-  # if line is LOCAL anchor in read file 
-  elif [[ "$line" == '<!-- LOCAL:'* ]]; then
-    # remove the first 12 chars
-    local=${line:12}
-    # % remove from end until after white space -- leave local details
-    local=${local% *}
-    # leave only path to file
-    local=${local#* }
-  fi 
-  # prints line to the page 
-  echo "$line"
- 
-  if [[ -n "$local" ]]; then
-  # cat file -- outputs full contents of file at local path 
-    cat "$local" | \
-    # remove the top 1# headers from cat'd file
-      sed -En '/^##|^[^#]/,$p' | \
-    # remove GH MD specific tags start w '[!NOTE\] + the following line
-      sed -E '/^>\[!NOTE\]*/{N;d;}' | \
-    # change GH specific MD IMPORTANT tags -> change into plain MD
-      sed -E 's/> \[!IMPORTANT\]/> **IMPORTANT:** /g'
-      echo
-  elif [[ -n "$src" ]]; then  
-    echo
-    path=${src#* }
-    repo=${src% *}
-    curl -s "https://raw.githubusercontent.com/${repo}/master/${path}" | \
-      # if line is ## or not #
-      sed -En '/^##|^[^#]/,$p' | \
-      # add additional # every header 
-      sed 's/^#/&'"${level:1}"'/g' | \
-      # format GH links when match
-      sed -E 's/(\[[^]]*\])\(([^):#]*)\)/\1(https:\/\/github.com\/'"$(sed 's/\//\\\//g' <<< "$repo")"'\/blob\/master\/\2)/g'
-    echo
+  # Reset markers for the current line (we'll set them if this line contains an anchor)
+src=''
+local=''
+
+  # If line is a header, capture its level (leading # characters)
+  if [[ "${line}" == \#* ]]; then
+    # Extract leading '#' characters (header level)
+    level="${line%%[^#]*}"
+  elif [[ "${line}" == '<!-- SRC:'* ]]; then
+    # Expect: <!-- SRC: owner/repo path/to/file -->
+    tmp="${line#<!-- SRC:}"
+    tmp="${tmp%%-->*}"
+    # trim whitespace
+    tmp="${tmp#"${tmp%%[![:space:]]*}"}"
+    tmp="${tmp%"${tmp##*[![:space:]]}"}"
+    # tmp now like "owner/repo path/to/file" (best-effort)
+src="${tmp}"
+  elif [[ "${line}" == '<!-- LOCAL:'* ]]; then
+    # Expect: <!-- LOCAL: <label> path/to/local/file -->
+    tmp="${line#<!-- LOCAL:}"
+    tmp="${tmp%%-->*}"
+    tmp="${tmp#"${tmp%%[![:space:]]*}"}"
+    tmp="${tmp%"${tmp##*[![:space:]]}"}"
+    # The last field is considered the path
+    local="${tmp##* }"
   fi
-  # read in dest file then write back to file
-done <<<"$(< $DEST)" > $DEST
+
+  # Print the current source line
+  echo "${line}"
+
+  # If a LOCAL anchor was detected, include the local file's content here with transformations
+  if [[ -n "${local}" ]]; then
+    if [[ -f "${local}" ]]; then
+      # Print the file starting from first H2 (##) or first non-header line,
+      # remove GH MD NOTE blocks that start with >[!NOTE] followed by the next line,
+      # and convert GH IMPORTANT tag into plain markdown.
+      sed -n '/^##\|^[^#]/,$p' "${local}" | \
+        sed -E '/^>\[!NOTE\]/{N;d;}' | \
+        sed -E 's/> \[!IMPORTANT\]/> **IMPORTANT:** /g'
+      echo
+    else
+      echo "<!-- LOCAL file not found: ${local} -->"
+      echo
+    fi
+
+  # If a SRC anchor was detected, fetch the file from the given repo/path and include it
+  elif [[ -n "${src}" ]]; then
+    echo
+    # Parse repo and path from src variable:
+    # Accept "owner/repo path/to/file" format; if no space present, try best-effort splitting.
+    repo="${src%% *}"
+    path="${src#* }"
+    if [[ "${repo}" == "${src}" ]]; then
+      # No space found; try to find first occurrence of owner/repo/... and split after second path segment
+      # Fallback: treat everything up to the first space as repo and remainder as path (best-effort)
+      # If we still can't determine a path, warn and skip.
+      if [[ "${src}" =~ ^([^/]+/[^/]+)/(.*)$ ]]; then
+        repo="${BASH_REMATCH[1]}"
+        path="${BASH_REMATCH[2]}"
+      else
+        path=""
+      fi
+    fi
+
+    if [[ -z "${path}" ]]; then
+      echo "<!-- SRC anchor malformed or missing path: ${src} -->"
+      echo
+    else
+      # Fetch raw file from GitHub master branch and transform similar to local:
+      if curl -fsS "https://raw.githubusercontent.com/${repo}/master/${path}" | \
+        sed -n '/^##\|^[^#]/,$p' | \
+        sed "s/^#/&#${level:1}/g" | \
+        sed -E "s#(\[[^]]*\])\(([^):#]*)\)#\1(https://github.com/${repo//\//\\/}/blob/master/\2)#g"; then
+        echo
+      else
+        echo "<!-- Failed to fetch or transform SRC: ${repo}/${path} -->" >&2
+        echo
+      fi
+    fi
+  fi
+
+done <<<"$(< "${DEST}")" > "${DEST}"
